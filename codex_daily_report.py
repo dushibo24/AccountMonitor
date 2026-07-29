@@ -21,13 +21,16 @@ import urllib.request
 DEFAULT_CONFIG = "config.json"
 
 
-def http_json(url, method="GET", headers=None, data=None, timeout=20):
-    """发送 HTTP 请求并解析 JSON 响应。"""
+def http_json(url, method="GET", headers=None, data=None, json_body=None, timeout=20):
+    """发送 HTTP 请求并解析 JSON 响应。data 为表单，json_body 为 JSON。"""
     body = None
     hdrs = {"User-Agent": "codex-daily-report/1.0"}
     if headers:
         hdrs.update(headers)
-    if data is not None:
+    if json_body is not None:
+        body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    elif data is not None:
         body = urllib.parse.urlencode(data).encode("utf-8")
         hdrs["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
@@ -170,6 +173,33 @@ def push_pushplus(token, title, content):
         raise RuntimeError(f"PushPlus 推送失败: {resp}")
 
 
+def push_wecom_app(wecom, title, content):
+    """企业微信自建应用推送（成员可在微信插件中接收）。
+
+    wecom: {"corpid": ..., "corpsecret": ..., "agentid": ..., "touser": "@all"(可选)}
+    """
+    qs = urllib.parse.urlencode({
+        "corpid": wecom["corpid"],
+        "corpsecret": wecom["corpsecret"],
+    })
+    token_resp = http_json(f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{qs}")
+    if token_resp.get("errcode"):
+        raise RuntimeError(f"企业微信获取 access_token 失败: {token_resp}")
+    access_token = token_resp["access_token"]
+
+    url = ("https://qyapi.weixin.qq.com/cgi-bin/message/send"
+           f"?access_token={access_token}")
+    payload = {
+        "touser": wecom.get("touser") or "@all",
+        "msgtype": "markdown",
+        "agentid": int(wecom["agentid"]),
+        "markdown": {"content": f"## {title}\n\n{content}"},
+    }
+    resp = http_json(url, method="POST", json_body=payload)
+    if resp.get("errcode"):
+        raise RuntimeError(f"企业微信推送失败: {resp}")
+
+
 # ---------- 入口 ----------
 
 # 密钥只允许放在 auth.json 中
@@ -236,23 +266,24 @@ def main():
 
     ok = True
     push = cfg.get("push") or {}
+    pushers = []
     if push.get("serverchan_sendkey"):
-        try:
-            push_serverchan(push["serverchan_sendkey"], title, content)
-            print("Server酱 推送成功")
-        except Exception as e:  # noqa: BLE001
-            print(f"Server酱 {e}", file=sys.stderr)
-            ok = False
+        pushers.append(("Server酱", lambda: push_serverchan(push["serverchan_sendkey"], title, content)))
     if push.get("pushplus_token"):
-        try:
-            push_pushplus(push["pushplus_token"], title, content)
-            print("PushPlus 推送成功")
-        except Exception as e:  # noqa: BLE001
-            print(f"PushPlus {e}", file=sys.stderr)
-            ok = False
-    if not (push.get("serverchan_sendkey") or push.get("pushplus_token")):
-        print("未配置任何推送渠道（push.serverchan_sendkey / push.pushplus_token）", file=sys.stderr)
+        pushers.append(("PushPlus", lambda: push_pushplus(push["pushplus_token"], title, content)))
+    if push.get("wecom"):
+        pushers.append(("企业微信", lambda: push_wecom_app(push["wecom"], title, content)))
+    if not pushers:
+        print("未配置任何推送渠道（push.serverchan_sendkey / push.pushplus_token / push.wecom）",
+              file=sys.stderr)
         return 1
+    for name, do_push in pushers:
+        try:
+            do_push()
+            print(f"{name} 推送成功")
+        except Exception as e:  # noqa: BLE001
+            print(f"{name} {e}", file=sys.stderr)
+            ok = False
     return 0 if ok else 1
 
 
