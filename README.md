@@ -4,12 +4,18 @@
 
 数据来源：new-api 管理端接口 `GET /api/channel/{id}/codex/usage`（即网页上「账户信息」按钮调用的接口，会自动刷新 OAuth token）。
 
-## 准备
+## 准备（密钥获取方式）
 
-1. **new-api 访问令牌**：浏览器登录 <https://napi.zq.cuiyong.net:44443> → 个人设置 → 系统访问令牌 → 生成一个令牌（需要管理员账号）。
-2. **推送渠道**（二选一或都填）：
-   - Server酱：<https://sct.ftqq.com> 微信扫码登录后拿到 SendKey
-   - PushPlus：<https://www.pushplus.plus> 微信扫码登录后拿到 token
+所有密钥只填写在本地 `config.json` 中（已在 `.gitignore` 里，不会上传 GitHub）。
+
+1. **new-api 访问令牌**（需要管理员账号）：
+   1. 浏览器登录 <https://napi.zq.cuiyong.net:44443>
+   2. 右上角头像 → **个人设置**
+   3. 找到 **系统访问令牌** → 生成新令牌并复制
+   4. 填入 `config.json` 的 `newapi_access_token`
+2. **推送渠道**（二选一或都填，微信扫码登录即可）：
+   - **Server酱**：打开 <https://sct.ftqq.com> → 微信扫码登录 → 复制 **SendKey** → 填入 `push.serverchan_sendkey`
+   - **PushPlus**：打开 <https://www.pushplus.plus> → 微信扫码登录 → 复制 **token** → 填入 `push.pushplus_token`
 
 ## 配置
 
