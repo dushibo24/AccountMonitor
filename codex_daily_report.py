@@ -46,9 +46,11 @@ def http_json(url, method="GET", headers=None, data=None, timeout=20):
 
 
 class NewApiClient:
-    def __init__(self, base_url, access_token):
+    def __init__(self, base_url, access_token, user_id=None):
         self.base_url = base_url.rstrip("/")
         self.headers = {"Authorization": f"Bearer {access_token}"}
+        if user_id:
+            self.headers["New-Api-User"] = str(user_id)
 
     def get(self, path, params=None):
         url = self.base_url + path
@@ -210,7 +212,7 @@ def main():
         print("请先在配置文件中填入有效的 newapi_access_token"
               "（new-api 个人设置 → 系统访问令牌）", file=sys.stderr)
         return 1
-    client = NewApiClient(cfg["newapi_base_url"], token)
+    client = NewApiClient(cfg["newapi_base_url"], token, cfg.get("newapi_user_id"))
 
     if args.list_channels:
         for ch in client.list_channels(cfg.get("channel_keyword", "codex")):

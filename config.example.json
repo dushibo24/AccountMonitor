@@ -1,5 +1,6 @@
 {
   "newapi_base_url": "https://napi.zq.cuiyong.net:44443",
+  "newapi_user_id": 1,
   "channel_ids": [],
   "channel_keyword": "codex"
 }
