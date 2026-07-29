@@ -6,7 +6,7 @@
 
 ## 准备（密钥获取方式）
 
-所有密钥只填写在本地 `config.json` 中（已在 `.gitignore` 里，不会上传 GitHub）。
+所有密钥只填写在本地 `auth.json` 中（已在 `.gitignore` 里，不会上传 GitHub）。
 
 1. **new-api 访问令牌**（需要管理员账号）：
    1. 浏览器登录 <https://napi.zq.cuiyong.net:44443>
@@ -20,9 +20,12 @@
 ## 配置
 
 ```bash
-cp config.example.json config.json
-# 编辑 config.json，填入令牌和推送 key
+cp config.example.json config.json   # 普通配置（base_url、渠道 ID）
+cp auth.example.json auth.json       # 密钥（令牌、推送 key）
+# 编辑 auth.json，填入令牌和推送 key
 ```
+
+**密钥只放在 `auth.json`**，该文件已被 `.gitignore` 排除，且项目内置了 Claude Code hook（`.claude/hooks/protect_auth.py`）阻止 AI 读取它。旧版 `config.json` 里的密钥会被脚本自动迁移到 `auth.json`。
 
 - `channel_ids`：渠道 ID 列表。不知道 ID 的话先运行 `python3 codex_daily_report.py --list-channels` 查看；留空则自动匹配名称含 `channel_keyword` 的所有渠道。
 - 推送渠道填一个即可，两个都填会各推一份。
@@ -43,4 +46,4 @@ python3 codex_daily_report.py             # 实际推送
 0 9 * * * cd /opt/AccountMonitor && /usr/bin/python3 codex_daily_report.py >> report.log 2>&1
 ```
 
-注意：`config.json` 含有访问令牌和推送 key，不要提交到公开仓库。
+注意：`auth.json` 含有访问令牌和推送 key，不要提交到公开仓库。

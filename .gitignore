@@ -1,4 +1,5 @@
 config.json
+auth.json
 __pycache__/
 *.pyc
 report.log

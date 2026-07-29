@@ -1,10 +1,5 @@
 {
   "newapi_base_url": "https://napi.zq.cuiyong.net:44443",
-  "newapi_access_token": "在这里填 new-api 个人设置里生成的系统访问令牌",
   "channel_ids": [],
-  "channel_keyword": "codex",
-  "push": {
-    "serverchan_sendkey": "",
-    "pushplus_token": ""
-  }
+  "channel_keyword": "codex"
 }

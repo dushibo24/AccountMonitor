@@ -12,6 +12,7 @@ Codex 账号日报：从 new-api 拉取 Codex 渠道的账户用量，推送到�
 import argparse
 import datetime
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -169,9 +170,31 @@ def push_pushplus(token, title, content):
 
 # ---------- 入口 ----------
 
+# 密钥只允许放在 auth.json 中
+SECRET_KEYS = ("newapi_access_token", "push")
+
+
 def load_config(path):
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    auth_path = os.path.join(os.path.dirname(os.path.abspath(path)), "auth.json")
+
+    # 旧版 config.json 里遗留的密钥自动迁移到 auth.json
+    moved = {k: cfg.pop(k) for k in SECRET_KEYS if cfg.get(k)}
+    auth = {}
+    if os.path.exists(auth_path):
+        with open(auth_path, encoding="utf-8") as f:
+            auth = json.load(f)
+    if moved:
+        auth = {**moved, **auth}  # auth.json 中已有的值优先
+        with open(auth_path, "w", encoding="utf-8") as f:
+            json.dump(auth, f, ensure_ascii=False, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print(f"已将 {', '.join(moved)} 从配置迁移到 auth.json")
+
+    cfg.update(auth)
+    return cfg
 
 
 def main():

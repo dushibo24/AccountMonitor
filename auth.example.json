@@ -1,0 +1,7 @@
+{
+  "newapi_access_token": "new-api 个人设置 → 系统访问令牌",
+  "push": {
+    "serverchan_sendkey": "Server酱 SendKey（可选）",
+    "pushplus_token": "PushPlus token（可选）"
+  }
+}
