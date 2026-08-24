@@ -13,12 +13,36 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 DEFAULT_CONFIG = "config.json"
+
+SENSITIVE_QUERY_KEYS = {
+    "access_token", "corpsecret", "secret", "sendkey", "token",
+}
+
+
+def safe_url_for_log(url):
+    """隐藏 URL 中可能出现的推送密钥，避免错误日志泄密。"""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        safe_query = urllib.parse.urlencode([
+            (key, "***" if key.lower() in SENSITIVE_QUERY_KEYS else value)
+            for key, value in query
+        ])
+        path = parts.path
+        if (parts.hostname or "").lower() == "sctapi.ftqq.com":
+            path = re.sub(r"/[^/]+\.send$", "/***.send", path)
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, path, safe_query, parts.fragment)
+        )
+    except (TypeError, ValueError):
+        return "<invalid-url>"
 
 
 def http_json(url, method="GET", headers=None, data=None, json_body=None, timeout=20):
@@ -34,18 +58,28 @@ def http_json(url, method="GET", headers=None, data=None, json_body=None, timeou
         body = urllib.parse.urlencode(data).encode("utf-8")
         hdrs["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+    safe_url = safe_url_for_log(url)
+    request_has_secret = safe_url != url or any(
+        str(key).lower() in SENSITIVE_QUERY_KEYS
+        for payload in (data, json_body)
+        if isinstance(payload, dict)
+        for key in payload
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"HTTP {e.code} {url}: {detail}")
+        if request_has_secret:
+            detail = "<已隐藏含凭据请求的响应正文>"
+        raise RuntimeError(f"HTTP {e.code} {safe_url}: {detail}")
     except urllib.error.URLError as e:
-        raise RuntimeError(f"请求失败 {url}: {e.reason}")
+        raise RuntimeError(f"请求失败 {safe_url_for_log(url)}: {e.reason}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        raise RuntimeError(f"响应不是 JSON {url}: {raw[:300]}")
+        detail = "<已隐藏含凭据请求的响应正文>" if request_has_secret else raw[:300]
+        raise RuntimeError(f"响应不是 JSON {safe_url}: {detail}")
 
 
 class NewApiClient:
@@ -104,28 +138,70 @@ def fmt_window(name, window):
     used = window.get("used_percent")
     if used is None:
         return None
+    try:
+        used_number = float(used)
+    except (TypeError, ValueError):
+        return None
     reset = fmt_reset_time(window.get("reset_at"))
     bar_len = 10
-    filled = round(min(max(float(used), 0), 100) / 100 * bar_len)
+    filled = round(min(max(used_number, 0), 100) / 100 * bar_len)
     bar = "█" * filled + "░" * (bar_len - filled)
-    return f"- {name}: {bar} {float(used):.0f}%（{reset} 重置）"
+    return f"- {name}: {bar} {used_number:.0f}%（{reset} 重置）"
+
+
+def _window_kind(window):
+    if not isinstance(window, dict):
+        return None
+    try:
+        seconds = float(window.get("limit_window_seconds"))
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return "weekly" if seconds >= 24 * 60 * 60 else "five_hour"
+
+
+def resolve_rate_limit_windows(usage):
+    """按窗口时长识别 5 小时/每周窗口，兼容 Free 套餐只有周窗口的情况。"""
+    rate_limit = usage.get("rate_limit") or {}
+    primary = rate_limit.get("primary_window")
+    secondary = rate_limit.get("secondary_window")
+    windows = [item for item in (primary, secondary) if isinstance(item, dict)]
+    plan_type = str(usage.get("plan_type") or rate_limit.get("plan_type") or "").lower()
+
+    five_hour = next((item for item in windows if _window_kind(item) == "five_hour"), None)
+    weekly = next((item for item in windows if _window_kind(item) == "weekly"), None)
+
+    if plan_type == "free":
+        return None, weekly or primary or secondary
+    if five_hour is None and weekly is None:
+        return primary, secondary
+    if five_hour is None:
+        five_hour = next((item for item in windows if item is not weekly), None)
+    if weekly is None:
+        weekly = next((item for item in windows if item is not five_hour), None)
+    return five_hour, weekly
 
 
 def format_account(channel, usage):
     name = channel.get("name") or f"渠道 {channel.get('id')}"
     lines = [f"### {name}"]
     if isinstance(usage, dict):
-        email = usage.get("email") or (usage.get("account") or {}).get("email")
-        plan = usage.get("plan_type")
+        account = usage.get("account")
+        email = usage.get("email") or (
+            account.get("email") if isinstance(account, dict) else None
+        )
+        rl = usage.get("rate_limit") or {}
+        plan = usage.get("plan_type") or rl.get("plan_type")
         if email:
             lines.append(f"- 账号: {email}")
         if plan:
             lines.append(f"- 套餐: {plan}")
-        rl = usage.get("rate_limit") or {}
-        w = fmt_window("5小时窗口", rl.get("primary_window"))
+        five_hour, weekly = resolve_rate_limit_windows(usage)
+        w = fmt_window("5小时窗口", five_hour)
         if w:
             lines.append(w)
-        w = fmt_window("每周窗口", rl.get("secondary_window"))
+        w = fmt_window("每周窗口", weekly)
         if w:
             lines.append(w)
         if rl.get("limit_reached"):
@@ -137,6 +213,13 @@ def format_account(channel, usage):
             lines.append(f"- 额度余额: {credits['balance']}")
         elif credits.get("has_credits") is False:
             lines.append("- 额度: 无额外 credits")
+        if credits.get("overage_limit_reached"):
+            lines.append("- ⚠️ 超额额度已受限")
+        if (usage.get("spend_control") or {}).get("reached"):
+            lines.append("- ⚠️ 消费额度已受限")
+        reset_credits = (usage.get("rate_limit_reset_credits") or {}).get("available_count")
+        if reset_credits not in (None, ""):
+            lines.append(f"- 可用重置次数: {reset_credits}")
     return "\n".join(lines)
 
 
@@ -152,7 +235,7 @@ def build_report(client, channel_ids):
             errors.append(f"### 渠道 {cid}\n- ❌ 获取失败: {e}")
     title = f"Codex 账号日报 {today}"
     content = "\n\n".join(sections + errors)
-    return title, content
+    return title, content, len(sections), len(errors)
 
 
 # ---------- 推送 ----------
@@ -161,16 +244,59 @@ def push_serverchan(sendkey, title, content):
     url = f"https://sctapi.ftqq.com/{sendkey}.send"
     resp = http_json(url, method="POST", data={"title": title, "desp": content})
     if resp.get("code") != 0:
-        raise RuntimeError(f"Server酱推送失败: {resp}")
+        raise RuntimeError(
+            f"Server酱推送失败: code={resp.get('code')}, "
+            f"message={resp.get('message') or resp.get('msg') or '未知错误'}"
+        )
 
 
 def push_pushplus(token, title, content):
-    url = "http://www.pushplus.plus/send"
+    url = "https://www.pushplus.plus/send"
     resp = http_json(url, method="POST",
                      data={"token": token, "title": title, "content": content,
                            "template": "markdown"})
     if resp.get("code") != 200:
-        raise RuntimeError(f"PushPlus 推送失败: {resp}")
+        raise RuntimeError(
+            f"PushPlus 推送失败: code={resp.get('code')}, "
+            f"message={resp.get('msg') or resp.get('message') or '未知错误'}"
+        )
+
+
+WECOM_ERROR_HINTS = {
+    40001: "corpsecret 不正确，确认使用的是自建应用 Secret，而不是通讯录 Secret",
+    40013: "corpid 不正确，请从「我的企业 → 企业信息」复制企业 ID",
+    40014: "access_token 无效，请稍后重试",
+    41001: "请求缺少 access_token",
+    60011: "应用不可见或成员不在应用可见范围内",
+    60020: "当前公网 IP 不在应用可信 IP 中；请更新可信 IP 后重试",
+    81013: "touser 不存在或不在应用可见范围内",
+}
+
+
+def _wecom_error(stage, resp):
+    code = resp.get("errcode")
+    message = resp.get("errmsg") or resp.get("message") or "未知错误"
+    try:
+        normalized_code = int(code)
+    except (TypeError, ValueError):
+        normalized_code = code
+    hint = WECOM_ERROR_HINTS.get(
+        normalized_code, "请按 errcode 查询企业微信开发文档"
+    )
+    return RuntimeError(f"企业微信{stage}失败: errcode={code}, errmsg={message}；{hint}")
+
+
+def validate_wecom_config(wecom):
+    if not isinstance(wecom, dict):
+        raise RuntimeError("企业微信配置 push.wecom 必须是 JSON 对象")
+    missing = [key for key in ("corpid", "corpsecret", "agentid") if not wecom.get(key)]
+    if missing:
+        raise RuntimeError(f"企业微信配置缺少: {', '.join(missing)}")
+    try:
+        agentid = int(wecom["agentid"])
+    except (TypeError, ValueError):
+        raise RuntimeError("企业微信 agentid 必须是数字") from None
+    return agentid
 
 
 def push_wecom_app(wecom, title, content):
@@ -178,26 +304,35 @@ def push_wecom_app(wecom, title, content):
 
     wecom: {"corpid": ..., "corpsecret": ..., "agentid": ..., "touser": "@all"(可选)}
     """
+    agentid = validate_wecom_config(wecom)
     qs = urllib.parse.urlencode({
         "corpid": wecom["corpid"],
         "corpsecret": wecom["corpsecret"],
     })
     token_resp = http_json(f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{qs}")
     if token_resp.get("errcode"):
-        raise RuntimeError(f"企业微信获取 access_token 失败: {token_resp}")
-    access_token = token_resp["access_token"]
+        raise _wecom_error("获取 access_token", token_resp)
+    access_token = token_resp.get("access_token")
+    if not access_token:
+        raise RuntimeError("企业微信获取 access_token 失败: 响应中缺少 access_token")
 
     url = ("https://qyapi.weixin.qq.com/cgi-bin/message/send"
            f"?access_token={access_token}")
     payload = {
         "touser": wecom.get("touser") or "@all",
         "msgtype": "markdown",
-        "agentid": int(wecom["agentid"]),
+        "agentid": agentid,
         "markdown": {"content": f"## {title}\n\n{content}"},
     }
     resp = http_json(url, method="POST", json_body=payload)
     if resp.get("errcode"):
-        raise RuntimeError(f"企业微信推送失败: {resp}")
+        raise _wecom_error("推送", resp)
+    invalid_users = resp.get("invaliduser")
+    if invalid_users:
+        raise RuntimeError(
+            f"企业微信返回成功但以下接收人无效: {invalid_users}；"
+            "请检查 touser、应用可见范围和成员状态"
+        )
 
 
 # ---------- 入口 ----------
@@ -207,20 +342,35 @@ SECRET_KEYS = ("newapi_access_token", "push")
 
 
 def load_config(path):
-    with open(path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"找不到配置文件 {path}；先执行 cp config.example.json config.json"
+        ) from None
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"配置文件 {path} 不是有效 JSON: 第 {e.lineno} 行") from None
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"配置文件 {path} 的顶层必须是 JSON 对象")
     auth_path = os.path.join(os.path.dirname(os.path.abspath(path)), "auth.json")
 
     # 旧版 config.json 里遗留的密钥自动迁移到 auth.json
     moved = {k: cfg.pop(k) for k in SECRET_KEYS if cfg.get(k)}
     auth = {}
     if os.path.exists(auth_path):
-        with open(auth_path, encoding="utf-8") as f:
-            auth = json.load(f)
+        try:
+            with open(auth_path, encoding="utf-8") as f:
+                auth = json.load(f)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"auth.json 不是有效 JSON: 第 {e.lineno} 行") from None
+        if not isinstance(auth, dict):
+            raise RuntimeError("auth.json 的顶层必须是 JSON 对象")
     if moved:
         auth = {**moved, **auth}  # auth.json 中已有的值优先
         with open(auth_path, "w", encoding="utf-8") as f:
             json.dump(auth, f, ensure_ascii=False, indent=2)
+        os.chmod(auth_path, 0o600)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         print(f"已将 {', '.join(moved)} 从配置迁移到 auth.json")
@@ -234,45 +384,82 @@ def main():
     parser.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="配置文件路径")
     parser.add_argument("--dry-run", action="store_true", help="只打印不推送")
     parser.add_argument("--list-channels", action="store_true", help="列出渠道后退出")
+    parser.add_argument("--test-wecom", action="store_true",
+                        help="跳过 new-api，向企业微信发送一条测试消息")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (OSError, RuntimeError) as e:
+        print(f"配置错误: {e}", file=sys.stderr)
+        return 1
+
+    if args.test_wecom:
+        wecom = (cfg.get("push") or {}).get("wecom")
+        try:
+            push_wecom_app(
+                wecom,
+                "AccountMonitor 企业微信测试",
+                f"测试时间：{datetime.datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}\n\n"
+                "如果你看到这条消息，企业微信凭据、可信 IP、应用可见范围和接收人均已打通。",
+            )
+        except Exception as e:  # noqa: BLE001 - CLI 需要给出可操作的诊断
+            print(str(e), file=sys.stderr)
+            return 1
+        print("企业微信测试消息发送成功")
+        return 0
+
     token = cfg.get("newapi_access_token", "")
     if not token or not token.isascii():
-        print("请先在配置文件中填入有效的 newapi_access_token"
+        print("请先在 auth.json 中填入有效的 newapi_access_token"
               "（new-api 个人设置 → 系统访问令牌）", file=sys.stderr)
         return 1
-    client = NewApiClient(cfg["newapi_base_url"], token, cfg.get("newapi_user_id"))
+    base_url = cfg.get("newapi_base_url")
+    if not base_url:
+        print("配置错误: 缺少 newapi_base_url", file=sys.stderr)
+        return 1
+    client = NewApiClient(base_url, token, cfg.get("newapi_user_id"))
 
     if args.list_channels:
-        for ch in client.list_channels(cfg.get("channel_keyword", "codex")):
+        try:
+            channels = client.list_channels(cfg.get("channel_keyword", "codex"))
+        except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
+            print(f"列出渠道失败: {e}", file=sys.stderr)
+            return 1
+        for ch in channels:
             print(f"id={ch.get('id')}\ttype={ch.get('type')}\tname={ch.get('name')}")
         return 0
 
     channel_ids = cfg.get("channel_ids")
     if not channel_ids:
         keyword = cfg.get("channel_keyword", "codex")
-        channel_ids = [ch["id"] for ch in client.list_channels(keyword)]
+        try:
+            channel_ids = [ch["id"] for ch in client.list_channels(keyword)]
+        except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
+            print(f"自动查找渠道失败: {e}", file=sys.stderr)
+            return 1
         if not channel_ids:
             print(f"未找到名称含「{keyword}」的渠道", file=sys.stderr)
             return 1
 
-    title, content = build_report(client, channel_ids)
+    title, content, success_count, failure_count = build_report(client, channel_ids)
     print(title)
     print(content)
 
     if args.dry_run:
-        return 0
+        return 0 if success_count > 0 and failure_count == 0 else 1
 
-    ok = True
+    ok = success_count > 0 and failure_count == 0
     push = cfg.get("push") or {}
     pushers = []
     if push.get("serverchan_sendkey"):
         pushers.append(("Server酱", lambda: push_serverchan(push["serverchan_sendkey"], title, content)))
     if push.get("pushplus_token"):
         pushers.append(("PushPlus", lambda: push_pushplus(push["pushplus_token"], title, content)))
-    if push.get("wecom"):
-        pushers.append(("企业微信", lambda: push_wecom_app(push["wecom"], title, content)))
+    wecom = push.get("wecom")
+    if isinstance(wecom, dict) and any(
+            wecom.get(key) for key in ("corpid", "corpsecret", "agentid")):
+        pushers.append(("企业微信", lambda: push_wecom_app(wecom, title, content)))
     if not pushers:
         print("未配置任何推送渠道（push.serverchan_sendkey / push.pushplus_token / push.wecom）",
               file=sys.stderr)

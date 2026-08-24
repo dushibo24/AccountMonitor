@@ -2,4 +2,5 @@ config.json
 auth.json
 __pycache__/
 *.pyc
+.venv/
 report.log
