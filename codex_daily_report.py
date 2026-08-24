@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,17 @@ DEFAULT_CONFIG = "config.json"
 SENSITIVE_QUERY_KEYS = {
     "access_token", "corpsecret", "secret", "sendkey", "token",
 }
+
+NEWAPI_MAX_ATTEMPTS = 3
+NEWAPI_RETRY_DELAYS = (1, 2)
+
+
+class HttpRequestError(RuntimeError):
+    """带有是否适合重试标记的 HTTP 请求错误。"""
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def safe_url_for_log(url):
@@ -72,9 +84,18 @@ def http_json(url, method="GET", headers=None, data=None, json_body=None, timeou
         detail = e.read().decode("utf-8", "replace")[:300]
         if request_has_secret:
             detail = "<已隐藏含凭据请求的响应正文>"
-        raise RuntimeError(f"HTTP {e.code} {safe_url}: {detail}")
+        raise HttpRequestError(
+            f"HTTP {e.code} {safe_url}: {detail}",
+            retryable=500 <= e.code < 600,
+        ) from None
     except urllib.error.URLError as e:
-        raise RuntimeError(f"请求失败 {safe_url_for_log(url)}: {e.reason}")
+        raise HttpRequestError(
+            f"请求失败 {safe_url}: {e.reason}", retryable=True
+        ) from None
+    except (TimeoutError, ConnectionError) as e:
+        raise HttpRequestError(
+            f"请求失败 {safe_url}: {e}", retryable=True
+        ) from None
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -83,9 +104,11 @@ def http_json(url, method="GET", headers=None, data=None, json_body=None, timeou
 
 
 class NewApiClient:
-    def __init__(self, base_url, access_token, user_id=None):
+    def __init__(self, base_url, access_token, user_id=None,
+                 max_attempts=NEWAPI_MAX_ATTEMPTS):
         self.base_url = base_url.rstrip("/")
         self.headers = {"Authorization": f"Bearer {access_token}"}
+        self.max_attempts = max(1, int(max_attempts))
         if user_id:
             self.headers["New-Api-User"] = str(user_id)
 
@@ -93,7 +116,28 @@ class NewApiClient:
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        return http_json(url, headers=self.headers)
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                resp = http_json(url, headers=self.headers)
+                upstream_status = resp.get("upstream_status") if isinstance(resp, dict) else None
+                if (isinstance(upstream_status, int) and upstream_status >= 500
+                        and resp.get("success") is False):
+                    raise HttpRequestError(
+                        f"new-api 上游 HTTP {upstream_status}: "
+                        f"{resp.get('message') or '服务暂时不可用'}",
+                        retryable=True,
+                    )
+                return resp
+            except HttpRequestError as e:
+                if not e.retryable or attempt >= self.max_attempts:
+                    raise
+                delay = NEWAPI_RETRY_DELAYS[min(attempt - 1, len(NEWAPI_RETRY_DELAYS) - 1)]
+                print(
+                    f"new-api 请求失败（第 {attempt}/{self.max_attempts} 次）: {e}；"
+                    f"{delay} 秒后重试",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
 
     def list_channels(self, keyword=""):
         # 管理端渠道列表（分页），按关键字过滤名称

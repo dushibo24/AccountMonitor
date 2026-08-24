@@ -4,6 +4,8 @@
 
 数据来源：new-api 管理端接口 `GET /api/channel/{id}/codex/usage`（即网页上「账户信息」按钮调用的接口，会自动刷新 OAuth token）。
 
+new-api 的只读请求遇到网络超时、连接中断或上游 5xx 时会自动尝试最多 3 次（间隔 1 秒、2 秒）；认证、权限等 4xx 错误不会重试。
+
 ## 准备（密钥获取方式）
 
 所有密钥只填写在本地 `auth.json` 中（已在 `.gitignore` 里，不会上传 GitHub）。
@@ -197,7 +199,7 @@ python3 codex_daily_report.py             # 实际推送
 
 ### macOS（launchd）
 
-先确认 `python3 codex_daily_report.py --dry-run` 和正式推送都成功，再安装定时任务。仓库提供安装脚本，默认每天 14:00 运行：
+先确认 `python3 codex_daily_report.py --dry-run` 和正式推送都成功，再安装定时任务。仓库提供安装脚本，默认每天 13:00 运行：
 
 ```bash
 ./tools/install_launchd.sh
@@ -205,13 +207,13 @@ launchctl kickstart gui/$(id -u)/com.dushibo.codex-daily-report                 
 launchctl bootout gui/$(id -u)/com.dushibo.codex-daily-report                                  # 卸载
 ```
 
-注意：电脑在 14:00 时需处于开机状态；睡眠中的 Mac 会在唤醒后补跑错过的任务。运行日志见 `report.log`。
+注意：电脑在 13:00 时需处于开机状态；睡眠中的 Mac 会在唤醒后补跑错过的任务。运行日志见 `report.log`。
 
 ### Linux 服务器（cron）
 
 ```cron
-# crontab -e，每天下午 2 点推送
-0 14 * * * cd /opt/AccountMonitor && /usr/bin/python3 codex_daily_report.py >> report.log 2>&1
+# crontab -e，每天下午 1 点推送
+0 13 * * * cd /opt/AccountMonitor && /usr/bin/python3 codex_daily_report.py >> report.log 2>&1
 ```
 
 注意：`auth.json` 含有访问令牌和推送 key，不要提交到公开仓库。

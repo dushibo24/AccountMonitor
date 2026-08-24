@@ -40,7 +40,7 @@ cat > "$plist_path" <<EOF
   <string>$escaped_project</string>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>14</integer>
+    <key>Hour</key><integer>13</integer>
     <key>Minute</key><integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
@@ -55,5 +55,5 @@ plutil -lint "$plist_path"
 launchctl bootout "$service_name" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$plist_path"
 print "已安装并加载：$plist_path"
-print "每天 14:00 运行；可执行以下命令立即测试："
+print "每天 13:00 运行；可执行以下命令立即测试："
 print "launchctl kickstart $service_name"

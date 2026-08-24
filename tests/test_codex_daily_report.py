@@ -36,6 +36,37 @@ class FakeClient:
 
 
 class ReportTests(unittest.TestCase):
+    def test_newapi_retries_transient_timeout_then_succeeds(self):
+        client = report.NewApiClient("https://example.com", "token")
+        transient = report.HttpRequestError("read timed out", retryable=True)
+        with mock.patch.object(
+            report, "http_json", side_effect=[transient, transient, {"success": True}]
+        ) as request, mock.patch.object(report.time, "sleep") as sleep:
+            self.assertEqual(client.get("/api/test"), {"success": True})
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_newapi_does_not_retry_non_retryable_error(self):
+        client = report.NewApiClient("https://example.com", "token")
+        unauthorized = report.HttpRequestError("HTTP 401", retryable=False)
+        with mock.patch.object(
+            report, "http_json", side_effect=unauthorized
+        ) as request, mock.patch.object(report.time, "sleep") as sleep:
+            with self.assertRaises(report.HttpRequestError):
+                client.get("/api/test")
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_newapi_retries_upstream_5xx_response(self):
+        client = report.NewApiClient("https://example.com", "token")
+        with mock.patch.object(report, "http_json", side_effect=[
+            {"success": False, "upstream_status": 502, "message": "bad gateway"},
+            {"success": True, "data": {}},
+        ]) as request, mock.patch.object(report.time, "sleep") as sleep:
+            self.assertTrue(client.get("/api/test")["success"])
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(1)
+
     def test_free_plan_primary_window_is_weekly(self):
         usage = {
             "plan_type": "free",
