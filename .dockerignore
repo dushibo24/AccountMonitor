@@ -1,0 +1,10 @@
+.git
+.gitignore
+.claude
+.venv
+__pycache__
+*.pyc
+auth.json
+config.json
+report.log
+tests

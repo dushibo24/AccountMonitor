@@ -1,0 +1,21 @@
+services:
+  account-monitor:
+    build:
+      context: .
+      args:
+        APP_UID: "1000"
+        APP_GID: "1000"
+    image: account-monitor:latest
+    container_name: account-monitor
+    init: true
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      REPORT_TIME: "13:00"
+      RUN_ON_START: "true"
+    dns:
+      - 223.5.5.5
+      - 1.1.1.1
+    volumes:
+      - ./config.json:/app/config/config.json:ro
+      - ./auth.json:/app/config/auth.json:ro

@@ -217,3 +217,40 @@ launchctl bootout gui/$(id -u)/com.dushibo.codex-daily-report                   
 ```
 
 注意：`auth.json` 含有访问令牌和推送 key，不要提交到公开仓库。
+
+### Docker（Ubuntu，推荐用于 pktgen）
+
+镜像基于 Ubuntu 22.04。容器启动时立即执行一次日报，之后常驻并按北京时间
+每天 13:00 执行。`config.json` 和 `auth.json` 通过只读挂载提供，不会写入镜像层。
+
+```bash
+# config.json、auth.json 已放在项目目录后：
+docker compose up -d --build
+docker compose logs -f account-monitor
+```
+
+修改时间或取消启动时立即执行，可编辑 `compose.yaml` 中的环境变量：
+
+- `REPORT_TIME`：`HH:MM` 格式，默认 `13:00`
+- `RUN_ON_START`：默认 `true`；设为 `false` 时仅等待定时执行
+
+手动试发企业微信或只拉取数据检查：
+
+```bash
+docker compose exec account-monitor \
+  python3 codex_daily_report.py -c /app/config/config.json --test-wecom
+docker compose exec account-monitor \
+  python3 codex_daily_report.py -c /app/config/config.json --dry-run
+```
+
+直接使用 `docker run` 时：
+
+```bash
+docker build -t account-monitor:latest .
+docker run -d --name account-monitor --restart unless-stopped \
+  --dns 223.5.5.5 --dns 1.1.1.1 \
+  -e TZ=Asia/Shanghai -e REPORT_TIME=13:00 \
+  -v "$PWD/config.json:/app/config/config.json:ro" \
+  -v "$PWD/auth.json:/app/config/auth.json:ro" \
+  account-monitor:latest
+```
