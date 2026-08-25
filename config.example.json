@@ -2,5 +2,17 @@
   "newapi_base_url": "https://napi.zq.cuiyong.net:44443",
   "newapi_user_id": 1,
   "channel_ids": [],
-  "channel_keyword": "codex"
+  "channel_keyword": "codex",
+  "kimi": {
+    "enabled": false,
+    "base_url": "https://www.kimi.com/apiv2"
+  },
+  "kimi_accounts": [
+    {
+      "channel_name": "Kimi 渠道名称 1"
+    },
+    {
+      "channel_name": "Kimi 渠道名称 2"
+    }
+  ]
 }

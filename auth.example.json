@@ -1,5 +1,9 @@
 {
   "newapi_access_token": "",
+  "kimi_cookies": {
+    "Kimi 渠道名称 1": "复制的完整 Cookie 1",
+    "Kimi 渠道名称 2": "复制的完整 Cookie 2"
+  },
   "push": {
     "serverchan_sendkey": "",
     "pushplus_token": "",

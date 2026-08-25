@@ -36,6 +36,89 @@ class FakeClient:
 
 
 class ReportTests(unittest.TestCase):
+    def test_kimi_formats_code_limits_and_subscription_usage(self):
+        content = report.format_kimi_account({
+            "ratelimit_code_5h": {"ratio": 0.25, "reset_time": "2026-08-25T20:00:00Z"},
+            "ratelimit_code_7d": {"ratio": 0.5, "reset_time": "2026-08-30T20:00:00Z"},
+            "subscription_balance": {"kimi_code_used_ratio": 0.75},
+        })
+        self.assertIn("5小时窗口（Kimi Code）", content)
+        self.assertIn("25%", content)
+        self.assertIn("每周窗口（Kimi Code）", content)
+        self.assertIn("订阅额度已用: 75%", content)
+
+    def test_kimi_accounts_are_mapped_by_channel_name(self):
+        accounts, error = report.resolve_kimi_accounts({
+            "kimi": {"enabled": True},
+            "kimi_accounts": [
+                {"channel_name": "Kimi 主账号"},
+                {"channel_name": "Kimi 备用账号", "channel_id": 22},
+            ],
+            "kimi_cookies": {
+                "Kimi 主账号": "cookie-one",
+                "Kimi 备用账号": "cookie-two",
+            },
+        })
+        self.assertIsNone(error)
+        self.assertEqual([item["name"] for item in accounts], ["Kimi 主账号", "Kimi 备用账号"])
+        self.assertEqual([item["cookie"] for item in accounts], ["cookie-one", "cookie-two"])
+
+    def test_kimi_client_uses_official_connect_endpoint_and_cookie(self):
+        client = report.KimiClient("session=secret")
+        with mock.patch.object(report, "http_json", return_value={"ratelimit_code_5h": {"ratio": 0.1}}) as request:
+            self.assertEqual(client.get_subscription_stats()["ratelimit_code_5h"]["ratio"], 0.1)
+        args = request.call_args
+        self.assertEqual(
+            args.args[0],
+            "https://www.kimi.com/apiv2/"
+            "kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats",
+        )
+        self.assertEqual(args.kwargs["headers"]["Cookie"], "session=secret")
+
+    def test_kimi_client_accepts_kimi_auth_bearer_token(self):
+        client = report.KimiClient("kimi-auth.example.token")
+        self.assertNotIn("Cookie", client.headers)
+        self.assertEqual(client.headers["Authorization"], "Bearer kimi-auth.example.token")
+
+    def test_kimi_only_dry_run_does_not_require_newapi_token(self):
+        config = {
+            "newapi_base_url": "https://example.com",
+            "kimi": {"enabled": True},
+            "kimi_cookie": "session=secret",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "config.json")
+            auth_path = os.path.join(tmp, "auth.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f)
+            with open(auth_path, "w", encoding="utf-8") as f:
+                json.dump({"kimi_cookie": "session=secret"}, f)
+            with mock.patch.object(
+                report.sys, "argv", ["codex_daily_report.py", "-c", config_path, "--dry-run"]
+            ), mock.patch.object(
+                report.KimiClient,
+                "get_subscription_stats",
+                return_value={"ratelimit_code_5h": {"ratio": 0.1}},
+            ):
+                self.assertEqual(report.main(), 0)
+
+    def test_kimi_test_path_does_not_require_newapi_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "config.json")
+            auth_path = os.path.join(tmp, "auth.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"kimi": {"enabled": True}}, f)
+            with open(auth_path, "w", encoding="utf-8") as f:
+                json.dump({"kimi_cookie": "session=secret"}, f)
+            with mock.patch.object(
+                report.sys, "argv", ["codex_daily_report.py", "-c", config_path, "--test-kimi"]
+            ), mock.patch.object(
+                report.KimiClient,
+                "get_subscription_stats",
+                return_value={"ratelimit_code_5h": {"ratio": 0.1}},
+            ):
+                self.assertEqual(report.main(), 0)
+
     def test_newapi_retries_transient_timeout_then_succeeds(self):
         client = report.NewApiClient("https://example.com", "token")
         transient = report.HttpRequestError("read timed out", retryable=True)

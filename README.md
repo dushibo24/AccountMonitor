@@ -1,6 +1,6 @@
-# Codex 账号日报
+# Codex / Kimi 账号日报
 
-每天从 new-api 拉取 Codex 渠道的账户用量（5 小时窗口 / 每周窗口使用百分比、套餐、credits 等），推送到微信（企业微信 / Server酱 / PushPlus）。
+每天从 new-api 拉取 Codex 渠道的账户用量，并可直接从 Kimi 官网官方接口拉取 Kimi Coding Plan 用量，推送到微信（企业微信 / Server酱 / PushPlus）。
 
 数据来源：new-api 管理端接口 `GET /api/channel/{id}/codex/usage`（即网页上「账户信息」按钮调用的接口，会自动刷新 OAuth token）。
 
@@ -181,6 +181,36 @@ chmod 600 auth.json                  # 仅允许当前用户读取
 
 **密钥只放在 `auth.json`**，该文件已被 `.gitignore` 排除，且项目内置了 Claude Code hook（`.claude/hooks/protect_auth.py`）阻止 AI 读取它。旧版 `config.json` 里的密钥会被脚本自动迁移到 `auth.json`。
 
+### Kimi Coding Plan（可选）
+
+Kimi 监测不经过 new-api，而是调用 Kimi 官网当前使用的官方接口：
+`POST https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats`。
+接口返回 Kimi Code 专属 5 小时 / 7 天限额以及订阅额度使用情况。
+
+1. 在浏览器登录 <https://www.kimi.com>，打开开发者工具 → **Network**，刷新「订阅 / 用量」页面。
+2. 找到请求路径包含 `kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats` 的请求：如果请求头有完整 `Cookie`，原样复制；如果使用 `Authorization: Bearer kimi-auth...`，则复制 Bearer 后面的完整令牌。
+3. 在 `config.json` 中按 **new-api 里的 Kimi 渠道名称** 配置一一对应关系；名称会直接用于日报标题：
+
+   ```json
+   "kimi": {
+     "enabled": true,
+     "base_url": "https://www.kimi.com/apiv2"
+   },
+   "kimi_accounts": [
+     {"channel_name": "Kimi 渠道名称 1"},
+     {"channel_name": "Kimi 渠道名称 2"}
+   ]
+   ```
+
+   ```json
+   "kimi_cookies": {
+     "Kimi 渠道名称 1": "账号 1 的完整 Cookie 或 kimi-auth 令牌",
+     "Kimi 渠道名称 2": "账号 2 的完整 Cookie 或 kimi-auth 令牌"
+   }
+   ```
+
+每个 `channel_name` 必须唯一，并且在 `kimi_cookies` 中有同名键；这样一个 new-api Kimi 渠道就对应一个独立 Cookie。某个 Cookie 失效只会让对应渠道显示失败，不影响其他账号。Cookie 只通过 `auth.json` 只读挂载注入 Docker，不会写入镜像或日志。Cookie 过期后，重新复制并替换本机 `auth.json`，然后执行 `docker compose restart`。
+
 - `channel_ids`：渠道 ID 列表。不知道 ID 的话先运行 `python3 codex_daily_report.py --list-channels` 查看；留空则自动匹配名称含 `channel_keyword` 的所有渠道。
 - `newapi_user_id`：访问令牌对应的用户 ID（管理员一般是 `1`，个人设置页面可见）。部分 new-api 版本要求随令牌一起发送 `New-Api-User` 请求头。
 - 推送渠道填一个即可，多个都填会各推一份；未使用的字段保持空字符串。
@@ -190,6 +220,7 @@ chmod 600 auth.json                  # 仅允许当前用户读取
 ```bash
 python3 codex_daily_report.py --dry-run   # 只打印消息
 python3 codex_daily_report.py --test-wecom # 只测试企业微信推送
+python3 codex_daily_report.py --test-kimi  # 逐个测试 Kimi 官方用量接口
 python3 codex_daily_report.py             # 实际推送
 ```
 
@@ -241,6 +272,8 @@ docker compose exec account-monitor \
   python3 codex_daily_report.py -c /app/config/config.json --test-wecom
 docker compose exec account-monitor \
   python3 codex_daily_report.py -c /app/config/config.json --dry-run
+docker compose exec account-monitor \
+  python3 codex_daily_report.py -c /app/config/config.json --test-kimi
 ```
 
 直接使用 `docker run` 时：

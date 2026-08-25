@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Codex 账号日报：从 new-api 拉取 Codex 渠道的账户用量，推送到微信（Server酱 / PushPlus）。
+Codex / Kimi Coding Plan 账号日报，推送到微信（Server酱 / PushPlus）。
 
 用法:
     python3 codex_daily_report.py                 # 生成并推送日报
@@ -28,6 +28,7 @@ SENSITIVE_QUERY_KEYS = {
 
 NEWAPI_MAX_ATTEMPTS = 3
 NEWAPI_RETRY_DELAYS = (1, 2)
+KIMI_DEFAULT_BASE_URL = "https://www.kimi.com/apiv2"
 
 
 class HttpRequestError(RuntimeError):
@@ -76,7 +77,8 @@ def http_json(url, method="GET", headers=None, data=None, json_body=None, timeou
         for payload in (data, json_body)
         if isinstance(payload, dict)
         for key in payload
-    )
+    ) or any(str(key).lower() in {"authorization", "cookie", "set-cookie"}
+             for key in hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -160,6 +162,48 @@ class NewApiClient:
         return resp.get("data") or {}
 
 
+class KimiClient:
+    """Kimi 官网 Coding Plan 用量客户端。
+
+    该接口是 Kimi 官网当前使用的 Connect JSON API；Cookie 由调用方从浏览器
+    复制后原样传入，不在日志或镜像中保存。
+    """
+
+    def __init__(self, cookie, base_url=KIMI_DEFAULT_BASE_URL):
+        cookie = str(cookie or "").strip()
+        if not cookie:
+            raise RuntimeError("Kimi 配置缺少 cookie")
+        self.base_url = str(base_url or KIMI_DEFAULT_BASE_URL).rstrip("/")
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://www.kimi.com",
+            "Referer": "https://www.kimi.com/",
+            "X-Language": "zh-CN",
+            "x-msh-platform": "web",
+        }
+        # 浏览器复制出来的通常是完整 Cookie；Kimi Code 新版也可能提供
+        # 形如 kimi-auth... 的 access token（官网前端以 Bearer 发送）。
+        if "=" in cookie or ";" in cookie:
+            self.headers["Cookie"] = cookie
+        else:
+            self.headers["Authorization"] = f"Bearer {cookie}"
+
+    def get_subscription_stats(self):
+        path = "/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
+        resp = http_json(
+            self.base_url + path,
+            method="POST",
+            headers=self.headers,
+            json_body={},
+        )
+        if not isinstance(resp, dict):
+            raise RuntimeError("Kimi 用量接口返回格式异常")
+        if resp.get("code") or resp.get("error_type") or resp.get("error"):
+            message = resp.get("message") or resp.get("error_type") or resp.get("error")
+            raise RuntimeError(f"Kimi 用量接口失败: {message}")
+        return resp
+
 # ---------- 消息格式化 ----------
 
 def fmt_reset_time(ts):
@@ -167,13 +211,135 @@ def fmt_reset_time(ts):
     if not ts:
         return "未知"
     try:
-        dt = datetime.datetime.fromtimestamp(int(ts)).astimezone()
+        if isinstance(ts, str) and not ts.strip().isdigit():
+            normalized = ts.strip().replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
+            dt = dt.astimezone()
+        else:
+            dt = datetime.datetime.fromtimestamp(int(ts)).astimezone()
         now = datetime.datetime.now().astimezone()
         if dt.date() == now.date():
             return dt.strftime("今天 %H:%M")
         return dt.strftime("%m-%d %H:%M")
     except (ValueError, OSError, OverflowError):
         return "未知"
+
+
+def _field(obj, *names):
+    if not isinstance(obj, dict):
+        return None
+    for name in names:
+        if name in obj and obj[name] is not None:
+            return obj[name]
+    return None
+
+
+def _ratio_percent(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    # Kimi 返回 ratio（0~1）；兼容已经是百分数的测试/代理响应。
+    if 0 <= number <= 1:
+        number *= 100
+    return number
+
+
+def fmt_kimi_window(name, window):
+    if not isinstance(window, dict):
+        return None
+    ratio = _field(window, "ratio", "used_ratio", "usedRatio")
+    used = _ratio_percent(ratio)
+    if used is None:
+        return None
+    reset = _field(window, "reset_time", "resetTime")
+    if isinstance(reset, dict):
+        reset = _field(reset, "seconds", "unix_seconds", "unixSeconds")
+    return fmt_window(name, {"used_percent": used, "reset_at": reset})
+
+
+def format_kimi_account(usage, name="Kimi Coding Plan"):
+    """格式化 Kimi 官方订阅统计，优先展示 Kimi Code 专属限额。"""
+    lines = [f"### {name}"]
+    subscriptions = _field(usage, "subscriptions") or []
+    if isinstance(subscriptions, list) and subscriptions:
+        sub = subscriptions[0] if isinstance(subscriptions[0], dict) else {}
+        plan = _field(sub, "display_name", "displayName", "name", "title")
+        if plan:
+            lines.append(f"- 套餐: {plan}")
+    five_hour = _field(usage, "ratelimit_code_5h", "ratelimitCode5h")
+    weekly = _field(usage, "ratelimit_code_7d", "ratelimitCode7d")
+    # 某些地区/版本只返回通用限额，作为兼容回退。
+    five_hour = five_hour or _field(usage, "ratelimit_5h", "ratelimit5h")
+    weekly = weekly or _field(usage, "ratelimit_7d", "ratelimit7d")
+    formatted = fmt_kimi_window("5小时窗口（Kimi Code）", five_hour)
+    if formatted:
+        lines.append(formatted)
+    formatted = fmt_kimi_window("每周窗口（Kimi Code）", weekly)
+    if formatted:
+        lines.append(formatted)
+    balance = _field(usage, "subscription_balance", "subscriptionBalance")
+    code_ratio = _field(balance, "kimi_code_used_ratio", "kimiCodeUsedRatio")
+    if code_ratio is not None:
+        percent = _ratio_percent(code_ratio)
+        if percent is not None:
+            lines.append(f"- 订阅额度已用: {percent:.0f}%")
+    if len(lines) == 1:
+        raise RuntimeError("Kimi 响应中没有可识别的 Coding Plan 用量字段")
+    return "\n".join(lines)
+
+
+def build_kimi_report(client, name="Kimi Coding Plan"):
+    try:
+        return format_kimi_account(client.get_subscription_stats(), name), 1, 0
+    except Exception as e:  # noqa: BLE001 - 与单个 new-api 渠道一致，继续其他来源
+        return f"### {name}\n- ❌ 获取失败: {e}", 0, 1
+
+
+def resolve_kimi_accounts(cfg):
+    """读取 Kimi 账号映射；Cookie 只从 auth.json 的 kimi_cookies 获取。"""
+    kimi_cfg = cfg.get("kimi") or {}
+    raw_accounts = cfg.get("kimi_accounts") or kimi_cfg.get("accounts") or []
+    raw_cookies = cfg.get("kimi_cookies") or {}
+    if not isinstance(raw_cookies, dict):
+        return [], "auth.json 的 kimi_cookies 必须是以渠道 ID 为键的 JSON 对象"
+
+    # 兼容旧版单账号配置；新配置应使用 channel_id 显式映射。
+    if not raw_accounts and (cfg.get("kimi_cookie") or kimi_cfg.get("cookie")):
+        raw_accounts = [{
+            "channel_id": kimi_cfg.get("channel_id", "default"),
+            "name": kimi_cfg.get("name", "Kimi Coding Plan"),
+            "base_url": kimi_cfg.get("base_url", KIMI_DEFAULT_BASE_URL),
+            "_legacy_cookie": cfg.get("kimi_cookie") or kimi_cfg.get("cookie"),
+        }]
+    if not isinstance(raw_accounts, list):
+        return [], "config.json 的 kimi_accounts 必须是数组"
+
+    accounts, seen = [], set()
+    for index, raw in enumerate(raw_accounts, 1):
+        if not isinstance(raw, dict):
+            return [], f"kimi_accounts 第 {index} 项必须是 JSON 对象"
+        channel_id = str(raw.get("channel_id")) if raw.get("channel_id") not in (None, "") else ""
+        channel_name = str(raw.get("channel_name") or raw.get("name") or "").strip()
+        if not channel_id and not channel_name:
+            return [], f"kimi_accounts 第 {index} 项缺少 channel_name"
+        identity = channel_name or channel_id
+        if identity in seen:
+            return [], f"kimi_accounts 存在重复渠道: {identity}"
+        seen.add(identity)
+        cookie = (raw.get("_legacy_cookie") or raw_cookies.get(channel_name)
+                  or raw_cookies.get(channel_id))
+        if isinstance(cookie, dict):
+            cookie = cookie.get("cookie")
+        accounts.append({
+            "channel_id": channel_id,
+            "name": channel_name or f"Kimi Coding Plan（渠道 {channel_id}）",
+            "base_url": raw.get("base_url") or kimi_cfg.get("base_url", KIMI_DEFAULT_BASE_URL),
+            "cookie": cookie,
+        })
+    return accounts, None
 
 
 def fmt_window(name, window):
@@ -430,6 +596,8 @@ def main():
     parser.add_argument("--list-channels", action="store_true", help="列出渠道后退出")
     parser.add_argument("--test-wecom", action="store_true",
                         help="跳过 new-api，向企业微信发送一条测试消息")
+    parser.add_argument("--test-kimi", action="store_true",
+                        help="只请求 Kimi 官方用量接口并打印结果，不推送")
     args = parser.parse_args()
 
     try:
@@ -437,6 +605,32 @@ def main():
     except (OSError, RuntimeError) as e:
         print(f"配置错误: {e}", file=sys.stderr)
         return 1
+
+    if args.test_kimi:
+        kimi_cfg = cfg.get("kimi") or {}
+        kimi_accounts, accounts_error = resolve_kimi_accounts(cfg)
+        if accounts_error:
+            print(accounts_error, file=sys.stderr)
+            return 1
+        if not kimi_accounts:
+            print("请先在 config.json 中配置 kimi_accounts 和 auth.json 中的 kimi_cookies",
+                  file=sys.stderr)
+            return 1
+        failed = False
+        for account in kimi_accounts:
+            if not account["cookie"]:
+                print(f"### {account['name']}\n- ❌ 未配置该渠道的 Cookie")
+                failed = True
+                continue
+            try:
+                usage = KimiClient(
+                    account["cookie"], account["base_url"]
+                ).get_subscription_stats()
+                print(format_kimi_account(usage, account["name"]))
+            except Exception as e:  # noqa: BLE001 - CLI 需要给出可操作的诊断
+                print(f"### {account['name']}\n- ❌ 获取失败: {e}")
+                failed = True
+        return 1 if failed else 0
 
     if args.test_wecom:
         wecom = (cfg.get("push") or {}).get("wecom")
@@ -454,17 +648,19 @@ def main():
         return 0
 
     token = cfg.get("newapi_access_token", "")
-    if not token or not token.isascii():
-        print("请先在 auth.json 中填入有效的 newapi_access_token"
-              "（new-api 个人设置 → 系统访问令牌）", file=sys.stderr)
-        return 1
     base_url = cfg.get("newapi_base_url")
-    if not base_url:
-        print("配置错误: 缺少 newapi_base_url", file=sys.stderr)
-        return 1
-    client = NewApiClient(base_url, token, cfg.get("newapi_user_id"))
+    kimi_cfg = cfg.get("kimi") or {}
+    kimi_cookie = cfg.get("kimi_cookie") or kimi_cfg.get("cookie")
+    kimi_accounts, kimi_accounts_error = resolve_kimi_accounts(cfg)
+    kimi_enabled = bool(kimi_cfg.get("enabled", bool(kimi_accounts)))
+    newapi_enabled = bool(token and isinstance(token, str) and token.isascii() and base_url)
 
     if args.list_channels:
+        if not newapi_enabled:
+            print("--list-channels 需要 auth.json 中有效的 newapi_access_token 和 newapi_base_url",
+                  file=sys.stderr)
+            return 1
+        client = NewApiClient(base_url, token, cfg.get("newapi_user_id"))
         try:
             channels = client.list_channels(cfg.get("channel_keyword", "codex"))
         except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
@@ -474,19 +670,59 @@ def main():
             print(f"id={ch.get('id')}\ttype={ch.get('type')}\tname={ch.get('name')}")
         return 0
 
-    channel_ids = cfg.get("channel_ids")
-    if not channel_ids:
-        keyword = cfg.get("channel_keyword", "codex")
-        try:
-            channel_ids = [ch["id"] for ch in client.list_channels(keyword)]
-        except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
-            print(f"自动查找渠道失败: {e}", file=sys.stderr)
-            return 1
+    sections = []
+    success_count = failure_count = 0
+    if newapi_enabled:
+        client = NewApiClient(base_url, token, cfg.get("newapi_user_id"))
+        channel_ids = cfg.get("channel_ids")
         if not channel_ids:
-            print(f"未找到名称含「{keyword}」的渠道", file=sys.stderr)
-            return 1
+            keyword = cfg.get("channel_keyword", "codex")
+            try:
+                channel_ids = [ch["id"] for ch in client.list_channels(keyword)]
+            except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
+                sections.append(f"### new-api Codex\n- ❌ 自动查找渠道失败: {e}")
+                channel_ids = []
+            if not channel_ids and not sections:
+                sections.append(f"### new-api Codex\n- ❌ 未找到名称含「{keyword}」的渠道")
+        if channel_ids:
+            _, report_content, succeeded, failed = build_report(client, channel_ids)
+            sections.append(report_content)
+            success_count += succeeded
+            failure_count += failed
+        elif sections:
+            failure_count += 1
 
-    title, content, success_count, failure_count = build_report(client, channel_ids)
+    if kimi_enabled:
+        if kimi_accounts_error:
+            sections.append(f"### Kimi Coding Plan\n- ❌ 配置错误: {kimi_accounts_error}")
+            failure_count += 1
+        elif not kimi_accounts:
+            sections.append("### Kimi Coding Plan\n- ❌ 配置已启用但没有 kimi_accounts")
+            failure_count += 1
+        else:
+            for account in kimi_accounts:
+                if not account["cookie"]:
+                    kimi_section, succeeded, failed = (
+                        f"### {account['name']}\n- ❌ 获取失败: 未配置该渠道的 Cookie",
+                        0,
+                        1,
+                    )
+                else:
+                    kimi_section, succeeded, failed = build_kimi_report(
+                        KimiClient(account["cookie"], account["base_url"]),
+                        account["name"],
+                    )
+                sections.append(kimi_section)
+                success_count += succeeded
+                failure_count += failed
+
+    if not sections:
+        print("请在 auth.json 中配置 newapi_access_token，或配置 kimi.cookie（并启用 Kimi）",
+              file=sys.stderr)
+        return 1
+
+    title = f"Codex / Kimi 账号日报 {datetime.date.today().isoformat()}"
+    content = "\n\n".join(sections)
     print(title)
     print(content)
 
