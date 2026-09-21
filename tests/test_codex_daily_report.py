@@ -34,6 +34,9 @@ class FakeClient:
             },
         }
 
+    def list_users(self):
+        return []
+
 
 class ReportTests(unittest.TestCase):
     def test_kimi_formats_code_limits_and_subscription_usage(self):
@@ -175,6 +178,39 @@ class ReportTests(unittest.TestCase):
         self.assertIn("消费额度已受限", content)
         self.assertIn("可用重置次数: 2", content)
 
+    def test_channel_groups_include_enabled_user_names(self):
+        users = report.users_by_group([
+            {"id": 1, "display_name": "甲", "group": "team-a", "status": 1},
+            {"id": 2, "username": "乙", "group": "team-a", "status": "1"},
+            {"id": 3, "display_name": "丙", "group": "team-a", "status": 2},
+            {"id": 4, "display_name": "丁", "group": "team-b", "status": 1},
+        ])
+        content = report.format_account(
+            {"name": "Account", "group": "team-a,team-b,team-empty"},
+            {},
+            users,
+        )
+        self.assertIn("用户组 team-a: 甲、乙", content)
+        self.assertNotIn("丙", content)
+        self.assertIn("用户组 team-b: 丁", content)
+        self.assertIn("用户组 team-empty: 暂无启用用户", content)
+
+    def test_newapi_user_list_is_paginated(self):
+        client = report.NewApiClient("https://example.com", "token")
+        with mock.patch.object(client, "get", side_effect=[
+            {
+                "success": True,
+                "data": {"total": 3, "items": [{"id": 3}, {"id": 2}]},
+            },
+            {
+                "success": True,
+                "data": {"total": 3, "items": [{"id": 1}]},
+            },
+        ]) as request:
+            self.assertEqual([user["id"] for user in client.list_users(2)], [3, 2, 1])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[1].args[1]["p"], 2)
+
     def test_build_report_exposes_partial_failure(self):
         _, content, succeeded, failed = report.build_report(
             FakeClient(failed_ids={2}), [1, 2]
@@ -182,6 +218,32 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((succeeded, failed), (1, 1))
         self.assertIn("Codex-1", content)
         self.assertIn("渠道 2", content)
+
+    def test_usage_failure_still_reports_channel_group_users(self):
+        client = mock.Mock()
+        client.get_channel.return_value = {
+            "id": 14,
+            "name": "Codex-14",
+            "group": "team-a",
+        }
+        client.get_codex_usage.side_effect = RuntimeError("usage unavailable")
+        _, content, succeeded, failed = report.build_report(
+            client, [14], {"team-a": ["甲", "乙"]}
+        )
+        self.assertEqual((succeeded, failed), (0, 1))
+        self.assertIn("Codex-14", content)
+        self.assertIn("用户组 team-a: 甲、乙", content)
+        self.assertIn("usage unavailable", content)
+
+    def test_enabled_channel_ids_only_returns_status_one(self):
+        channels = [
+            {"id": 3, "status": 1},
+            {"id": 10, "status": 2},
+            {"id": 13, "status": "1"},
+            {"id": 14},
+            None,
+        ]
+        self.assertEqual(report.enabled_channel_ids(channels), [3, 13])
 
     def test_sensitive_urls_are_redacted(self):
         url = (

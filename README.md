@@ -4,6 +4,8 @@
 
 数据来源：new-api 管理端接口 `GET /api/channel/{id}/codex/usage`（即网页上「账户信息」按钮调用的接口，会自动刷新 OAuth token）。
 
+日报还会通过管理端用户列表接口读取启用用户，并在每个渠道下展示该渠道可用的用户组及组内用户显示名；不会展示用户邮箱、额度等无关信息。
+
 new-api 的只读请求遇到网络超时、连接中断或上游 5xx 时会自动尝试最多 3 次（间隔 1 秒、2 秒）；认证、权限等 4xx 错误不会重试。
 
 ## 准备（密钥获取方式）
@@ -211,7 +213,7 @@ Kimi 监测不经过 new-api，而是调用 Kimi 官网当前使用的官方接�
 
 每个 `channel_name` 必须唯一，并且在 `kimi_cookies` 中有同名键；这样一个 new-api Kimi 渠道就对应一个独立 Cookie。某个 Cookie 失效只会让对应渠道显示失败，不影响其他账号。Cookie 只通过 `auth.json` 只读挂载注入 Docker，不会写入镜像或日志。Cookie 过期后，重新复制并替换本机 `auth.json`，然后执行 `docker compose restart`。
 
-- `channel_ids`：渠道 ID 列表。不知道 ID 的话先运行 `python3 codex_daily_report.py --list-channels` 查看；留空则自动匹配名称含 `channel_keyword` 的所有渠道。
+- `channel_ids`：渠道 ID 列表。不知道 ID 的话先运行 `python3 codex_daily_report.py --list-channels` 查看；留空则每次运行时自动匹配名称含 `channel_keyword` 且已启用（`status=1`）的渠道，新增、启用或禁用渠道后无需手动更新 ID。
 - `newapi_user_id`：访问令牌对应的用户 ID（管理员一般是 `1`，个人设置页面可见）。部分 new-api 版本要求随令牌一起发送 `New-Api-User` 请求头。
 - 推送渠道填一个即可，多个都填会各推一份；未使用的字段保持空字符串。
 

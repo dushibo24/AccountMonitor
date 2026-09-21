@@ -149,6 +149,39 @@ class NewApiClient:
         data = resp.get("data") or {}
         return data.get("items") or data.get("records") or []
 
+    def list_users(self, page_size=100):
+        """分页读取管理端用户列表。"""
+        users, seen_ids = [], set()
+        page = 1
+        while True:
+            resp = self.get("/api/user/", {"p": page, "page_size": page_size})
+            if not resp.get("success"):
+                raise RuntimeError(f"查询用户失败: {resp.get('message')}")
+            data = resp.get("data") or {}
+            items = data.get("items") or data.get("records") or []
+            new_count = 0
+            for user in items:
+                if not isinstance(user, dict):
+                    continue
+                identity = user.get("id")
+                if identity is not None and identity in seen_ids:
+                    continue
+                if identity is not None:
+                    seen_ids.add(identity)
+                users.append(user)
+                new_count += 1
+
+            try:
+                total = int(data.get("total"))
+            except (TypeError, ValueError):
+                total = None
+            if not items or new_count == 0 or (total is not None and len(users) >= total):
+                break
+            if total is None and len(items) < page_size:
+                break
+            page += 1
+        return users
+
     def get_channel(self, channel_id):
         resp = self.get(f"/api/channel/{channel_id}")
         if not resp.get("success"):
@@ -393,7 +426,44 @@ def resolve_rate_limit_windows(usage):
     return five_hour, weekly
 
 
-def format_account(channel, usage):
+def _group_names(value):
+    """解析 new-api 使用逗号分隔的用户组字段。"""
+    if isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = str(value or "").split(",")
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def users_by_group(users):
+    """建立启用用户的 用户组 -> 显示名列表 映射。"""
+    result = {}
+    for user in users:
+        if not isinstance(user, dict) or str(user.get("status")) != "1":
+            continue
+        name = user.get("display_name") or user.get("username")
+        if not name:
+            name = f"用户 {user.get('id')}" if user.get("id") is not None else "未命名用户"
+        for group in _group_names(user.get("group")):
+            names = result.setdefault(group, [])
+            if name not in names:
+                names.append(str(name))
+    return result
+
+
+def format_channel_groups(channel, group_users):
+    """格式化渠道可用用户组及其启用用户。"""
+    if group_users is None:
+        return []
+    lines = []
+    for group in _group_names(channel.get("group")):
+        names = group_users.get(group) or []
+        members = "、".join(names) if names else "暂无启用用户"
+        lines.append(f"- 用户组 {group}: {members}")
+    return lines
+
+
+def format_account(channel, usage, group_users=None):
     name = channel.get("name") or f"渠道 {channel.get('id')}"
     lines = [f"### {name}"]
     if isinstance(usage, dict):
@@ -407,6 +477,7 @@ def format_account(channel, usage):
             lines.append(f"- 账号: {email}")
         if plan:
             lines.append(f"- 套餐: {plan}")
+        lines.extend(format_channel_groups(channel, group_users))
         five_hour, weekly = resolve_rate_limit_windows(usage)
         w = fmt_window("5小时窗口", five_hour)
         if w:
@@ -433,19 +504,37 @@ def format_account(channel, usage):
     return "\n".join(lines)
 
 
-def build_report(client, channel_ids):
+def build_report(client, channel_ids, group_users=None):
     today = datetime.date.today().isoformat()
     sections, errors = [], []
     for cid in channel_ids:
         try:
             channel = client.get_channel(cid)
-            usage = client.get_codex_usage(cid)
-            sections.append(format_account(channel, usage))
         except Exception as e:  # noqa: BLE001 - 单个账号失败不影响其他账号
             errors.append(f"### 渠道 {cid}\n- ❌ 获取失败: {e}")
+            continue
+        try:
+            usage = client.get_codex_usage(cid)
+            sections.append(format_account(channel, usage, group_users))
+        except Exception as e:  # noqa: BLE001 - 单个账号失败不影响其他账号
+            name = channel.get("name") or f"渠道 {cid}"
+            lines = [f"### {name}"]
+            lines.extend(format_channel_groups(channel, group_users))
+            lines.append(f"- ❌ 获取失败: {e}")
+            errors.append("\n".join(lines))
     title = f"Codex 账号日报 {today}"
     content = "\n\n".join(sections + errors)
     return title, content, len(sections), len(errors)
+
+
+def enabled_channel_ids(channels):
+    """从 new-api 渠道列表中提取已启用（status=1）的渠道 ID。"""
+    return [
+        channel["id"] for channel in channels
+        if isinstance(channel, dict)
+        and str(channel.get("status")) == "1"
+        and channel.get("id") is not None
+    ]
 
 
 # ---------- 推送 ----------
@@ -667,7 +756,10 @@ def main():
             print(f"列出渠道失败: {e}", file=sys.stderr)
             return 1
         for ch in channels:
-            print(f"id={ch.get('id')}\ttype={ch.get('type')}\tname={ch.get('name')}")
+            print(
+                f"id={ch.get('id')}\tstatus={ch.get('status')}\t"
+                f"type={ch.get('type')}\tname={ch.get('name')}"
+            )
         return 0
 
     sections = []
@@ -678,15 +770,32 @@ def main():
         if not channel_ids:
             keyword = cfg.get("channel_keyword", "codex")
             try:
-                channel_ids = [ch["id"] for ch in client.list_channels(keyword)]
+                # new-api: status=1 为启用，status=2 为禁用。每次运行都重新
+                # 查询，渠道新增、启用或禁用后无需再手动维护 ID 列表。
+                channel_ids = enabled_channel_ids(client.list_channels(keyword))
             except Exception as e:  # noqa: BLE001 - CLI 统一输出简洁错误
                 sections.append(f"### new-api Codex\n- ❌ 自动查找渠道失败: {e}")
                 channel_ids = []
             if not channel_ids and not sections:
-                sections.append(f"### new-api Codex\n- ❌ 未找到名称含「{keyword}」的渠道")
+                sections.append(
+                    f"### new-api Codex\n"
+                    f"- ❌ 未找到名称含「{keyword}」且已启用的渠道"
+                )
         if channel_ids:
-            _, report_content, succeeded, failed = build_report(client, channel_ids)
+            group_users = None
+            group_error = None
+            try:
+                group_users = users_by_group(client.list_users())
+            except Exception as e:  # noqa: BLE001 - 用户组失败不影响用量日报
+                group_error = str(e)
+            _, report_content, succeeded, failed = build_report(
+                client, channel_ids, group_users
+            )
             sections.append(report_content)
+            if group_error:
+                sections.append(
+                    f"### new-api 用户组\n- ⚠️ 获取用户组成员失败: {group_error}"
+                )
             success_count += succeeded
             failure_count += failed
         elif sections:
